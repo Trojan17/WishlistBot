@@ -18,8 +18,14 @@ BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 # The channel where the bot will POST messages
 TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0"))
 
+# Debug: print at startup
+print(f"[CONFIG] TARGET_CHANNEL_ID loaded as: {TARGET_CHANNEL_ID}")
+
 # Set up intents
 intents = discord.Intents.default()
+intents.guilds = True
+intents.message_content = True
+# Required to see channels
 # Note: message_content intent not needed for slash commands only
 # Enable it in Discord Developer Portal if you add message-based features
 
@@ -56,6 +62,7 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
 
 
+
 @bot.tree.command(
     name="add",
     description="Add a message to the watchlist channel"
@@ -66,18 +73,49 @@ async def add_command(interaction: discord.Interaction, message: str):
     Slash command to add a message.
     Can be used in any channel, posts to the target channel.
     """
-    # Get the target channel
-    target_channel = bot.get_channel(TARGET_CHANNEL_ID)
+    # Try to get the target channel from this guild
+    target_channel = interaction.guild.get_channel(TARGET_CHANNEL_ID)
+
+    # If not found in guild, try global cache
+    if not target_channel:
+        target_channel = bot.get_channel(TARGET_CHANNEL_ID)
+
+    # If still not found, try fetching from API
+    if not target_channel:
+        try:
+            target_channel = await bot.fetch_channel(TARGET_CHANNEL_ID)
+        except discord.NotFound:
+            await interaction.response.send_message(
+                f"❌ Channel `{TARGET_CHANNEL_ID}` does not exist.",
+                ephemeral=True
+            )
+            return
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                f"❌ I don't have permission to access channel `{TARGET_CHANNEL_ID}`",
+                ephemeral=True
+            )
+            return
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch channel: {e}")
+            await interaction.response.send_message(
+                f"❌ Error fetching channel: {e}",
+                ephemeral=True
+            )
+            return
 
     if not target_channel:
         await interaction.response.send_message(
-            "❌ Target channel not found. Please check the bot configuration.",
+            f"❌ Target channel not found (ID: `{TARGET_CHANNEL_ID}`).",
             ephemeral=True
         )
         return
 
     # Check if bot has permission to send in target channel
-    if not target_channel.permissions_for(interaction.guild.me).send_messages:
+    bot_member = interaction.guild.me
+    channel_perms = target_channel.permissions_for(bot_member)
+
+    if not channel_perms.send_messages:
         await interaction.response.send_message(
             f"❌ I don't have permission to send messages in {target_channel.mention}",
             ephemeral=True
@@ -85,9 +123,16 @@ async def add_command(interaction: discord.Interaction, message: str):
         return
 
     # Post the message to the target channel
-    posted_message = await target_channel.send(
-        f"**Added by {interaction.user.mention}:**\n> {message}"
-    )
+    try:
+        posted_message = await target_channel.send(
+            f"**Added by {interaction.user.mention}:**\n> {message}"
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            f"❌ Failed to send message - missing permissions in {target_channel.mention}",
+            ephemeral=True
+        )
+        return
 
     # Store the message info
     entry = {

@@ -12,16 +12,16 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Configuration - Replace these with your actual values
-BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+# Configuration
+BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
-# The specific channel ID where commands are allowed
-# This channel ID will work on whichever server contains it
-ALLOWED_CHANNEL_ID = int(os.getenv("ALLOWED_CHANNEL_ID", "0"))
+# The channel where the bot will POST messages
+TARGET_CHANNEL_ID = int(os.getenv("TARGET_CHANNEL_ID", "0"))
 
 # Set up intents
 intents = discord.Intents.default()
-intents.message_content = True
+# Note: message_content intent not needed for slash commands only
+# Enable it in Discord Developer Portal if you add message-based features
 
 # Create bot instance
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -42,10 +42,10 @@ async def on_ready():
         print(f"  - {guild.name} (ID: {guild.id})")
     print("------")
 
-    if ALLOWED_CHANNEL_ID:
-        print(f"Commands restricted to channel ID: {ALLOWED_CHANNEL_ID}")
+    if TARGET_CHANNEL_ID:
+        print(f"Messages will be posted to channel ID: {TARGET_CHANNEL_ID}")
     else:
-        print("Commands allowed in all channels")
+        print("WARNING: TARGET_CHANNEL_ID not set!")
     print("------")
 
     # Sync slash commands globally (works on all servers)
@@ -56,53 +56,59 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
 
 
-def check_channel_allowed(interaction: discord.Interaction) -> bool:
-    """Check if the command is allowed in this channel."""
-    # If no channel restriction set, allow all channels
-    if not ALLOWED_CHANNEL_ID:
-        return True
-
-    # Check if current channel matches the allowed channel
-    return interaction.channel_id == ALLOWED_CHANNEL_ID
-
-
 @bot.tree.command(
     name="add",
-    description="Add a message to the list"
+    description="Add a message to the watchlist channel"
 )
 @app_commands.describe(message="The message you want to add")
 async def add_command(interaction: discord.Interaction, message: str):
     """
     Slash command to add a message.
-    Only works in the specified channel (if configured).
+    Can be used in any channel, posts to the target channel.
     """
-    # Check if command is used in the allowed channel
-    if not check_channel_allowed(interaction):
+    # Get the target channel
+    target_channel = bot.get_channel(TARGET_CHANNEL_ID)
+
+    if not target_channel:
         await interaction.response.send_message(
-            f"❌ This command can only be used in <#{ALLOWED_CHANNEL_ID}>",
-            ephemeral=True  # Only visible to the user
+            "❌ Target channel not found. Please check the bot configuration.",
+            ephemeral=True
         )
         return
 
-    # Add the message to our storage
+    # Check if bot has permission to send in target channel
+    if not target_channel.permissions_for(interaction.guild.me).send_messages:
+        await interaction.response.send_message(
+            f"❌ I don't have permission to send messages in {target_channel.mention}",
+            ephemeral=True
+        )
+        return
+
+    # Post the message to the target channel
+    posted_message = await target_channel.send(
+        f"**Added by {interaction.user.mention}:**\n> {message}"
+    )
+
+    # Store the message info
     entry = {
         "guild_id": interaction.guild_id,
         "guild_name": interaction.guild.name,
         "user": interaction.user.name,
         "user_id": interaction.user.id,
         "message": message,
+        "message_id": posted_message.id,
         "timestamp": interaction.created_at.isoformat()
     }
     added_messages.append(entry)
 
-    # Send confirmation
+    # Send confirmation to the user (ephemeral = only they see it)
     await interaction.response.send_message(
-        f"✅ Message added by {interaction.user.mention}:\n> {message}",
-        ephemeral=False  # Visible to everyone
+        f"✅ Message posted to {target_channel.mention}",
+        ephemeral=True
     )
 
-    # Log to console with guild info
-    print(f"[ADD] [{interaction.guild.name} ({interaction.guild_id})] {interaction.user.name}: {message}")
+    # Log to console
+    print(f"[ADD] [{interaction.guild.name}] {interaction.user.name}: {message}")
 
 
 @bot.tree.command(
@@ -112,16 +118,7 @@ async def add_command(interaction: discord.Interaction, message: str):
 async def list_command(interaction: discord.Interaction):
     """
     Slash command to list all added messages for this server.
-    Only works in the specified channel (if configured).
     """
-    # Check if command is used in the allowed channel
-    if not check_channel_allowed(interaction):
-        await interaction.response.send_message(
-            f"❌ This command can only be used in <#{ALLOWED_CHANNEL_ID}>",
-            ephemeral=True
-        )
-        return
-
     # Filter messages for this guild only
     guild_messages = [m for m in added_messages if m.get("guild_id") == interaction.guild_id]
 
@@ -140,7 +137,7 @@ async def list_command(interaction: discord.Interaction):
 
     await interaction.response.send_message(
         f"📋 **Added Messages** (showing last {min(10, len(guild_messages))}):\n{messages_text}",
-        ephemeral=False
+        ephemeral=True
     )
 
 
@@ -154,13 +151,6 @@ async def clear_command(interaction: discord.Interaction):
     Slash command to clear all messages for this server.
     Only available to administrators.
     """
-    if not check_channel_allowed(interaction):
-        await interaction.response.send_message(
-            f"❌ This command can only be used in <#{ALLOWED_CHANNEL_ID}>",
-            ephemeral=True
-        )
-        return
-
     # Count and remove only this guild's messages
     global added_messages
     guild_id = interaction.guild_id
@@ -169,7 +159,7 @@ async def clear_command(interaction: discord.Interaction):
 
     await interaction.response.send_message(
         f"🗑️ Cleared {count} message(s) from this server.",
-        ephemeral=False
+        ephemeral=True
     )
 
 
@@ -185,14 +175,14 @@ async def info_command(interaction: discord.Interaction):
         f"**Server Info**\n"
         f"• Name: {guild.name}\n"
         f"• Server ID: `{guild.id}`\n"
-        f"• Channel ID: `{interaction.channel_id}`\n"
+        f"• This Channel ID: `{interaction.channel_id}`\n"
         f"• Your ID: `{interaction.user.id}`\n"
     )
 
-    if ALLOWED_CHANNEL_ID:
-        info_text += f"• Allowed Channel: <#{ALLOWED_CHANNEL_ID}>"
+    if TARGET_CHANNEL_ID:
+        info_text += f"• Target Channel: <#{TARGET_CHANNEL_ID}>"
     else:
-        info_text += "• Allowed Channel: All channels"
+        info_text += "• Target Channel: Not configured"
 
     await interaction.response.send_message(info_text, ephemeral=True)
 
@@ -209,8 +199,6 @@ async def clear_error(interaction: discord.Interaction, error: app_commands.AppC
 
 # Run the bot
 if __name__ == "__main__":
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("ERROR: Please set your bot token in the .env file or environment variables!")
-        print("See README.md for setup instructions.")
-    else:
-        bot.run(BOT_TOKEN)
+    if not BOT_TOKEN:
+        raise ValueError("DISCORD_BOT_TOKEN environment variable is not set!")
+    bot.run(BOT_TOKEN)
